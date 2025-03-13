@@ -7,7 +7,94 @@ import (
 	"os"
 	"strings"
 	"syscall"
+  "libvirt.org/go/libvirt"
 )
+
+// VirtualMachine represents a VM's details
+type VirtualMachine struct {
+	Name          string  `json:"name"`
+	Status        string  `json:"status"`
+	CPUUsage      uint    `json:"cpu_usage"`
+	MemoryTotalMB uint64  `json:"memory_total_mb"`
+	MemoryUsedMB  uint64  `json:"memory_used_mb"`
+}
+
+// GetVMsHandler retrieves information about VMs
+func GetVMsHandler(w http.ResponseWriter, r *http.Request) {
+	conn, err := libvirt.NewConnect("qemu:///system") // Adjust for remote connection if needed
+	if err != nil {
+		http.Error(w, "Failed to connect to Libvirt", http.StatusInternalServerError)
+		return
+	}
+	defer conn.Close()
+
+	domains, err := conn.ListAllDomains(0)
+	if err != nil {
+		http.Error(w, "Failed to list VMs", http.StatusInternalServerError)
+		return
+	}
+
+	var vms []VirtualMachine
+	for _, dom := range domains {
+		name, _ := dom.GetName()
+		state, _, _ := dom.GetState()
+		maxMem, _ := dom.GetMaxMemory()
+		memStats, _ := dom.MemoryStats(10, 0)
+
+		var usedMem uint64
+		for _, stat := range memStats {
+			if stat.Tag == libvirt.DOMAIN_MEMORY_STAT_ACTUAL_BALLOON {
+				usedMem = stat.Val / 1024
+			}
+		}
+
+		vms = append(vms, VirtualMachine{
+			Name:          name,
+			Status:        domainStateToString(state),
+			CPUUsage:      getVCPUCount(dom),
+			MemoryTotalMB: maxMem / 1024,
+			MemoryUsedMB:  usedMem,
+		})
+		dom.Free()
+	}
+
+	jsonResponse(w, vms)
+}
+
+// Convert domain state to human-readable string
+func domainStateToString(state libvirt.DomainState) string {
+	switch state {
+	case libvirt.DOMAIN_RUNNING:
+		return "Running"
+	case libvirt.DOMAIN_BLOCKED:
+		return "Blocked"
+	case libvirt.DOMAIN_PAUSED:
+		return "Paused"
+	case libvirt.DOMAIN_SHUTDOWN:
+		return "Shutdown"
+	case libvirt.DOMAIN_SHUTOFF:
+		return "Shutoff"
+	case libvirt.DOMAIN_CRASHED:
+		return "Crashed"
+	default:
+		return "Unknown"
+	}
+}
+
+// Get the number of vCPUs assigned to a domain
+func getVCPUCount(dom libvirt.Domain) uint {
+	info, err := dom.GetInfo()
+	if err != nil {
+		return 0
+	}
+	return info.NrVirtCpu
+}
+
+// jsonResponse helper to send JSON responses
+func jsonResponse(w http.ResponseWriter, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(data)
+}
 
 // UptimeHandler returns system uptime
 func UptimeHandler(w http.ResponseWriter, r *http.Request) {
@@ -81,6 +168,7 @@ func main() {
 	http.HandleFunc("/uptime", UptimeHandler)
 	http.HandleFunc("/diskusage", DiskUsageHandler)
 	http.HandleFunc("/os-release", OSReleaseHandler)
+	http.HandleFunc("/vms", GetVMsHandler)
 
 	fmt.Println("Server started on :8069")
 	http.ListenAndServe(":8069", nil)
