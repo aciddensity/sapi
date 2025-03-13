@@ -1,99 +1,69 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"os"
-	"strings"
-	"syscall"
-  "libvirt.org/go/libvirt"
+  "encoding/json"
+  "net/http"
+  "os"
+  "strings"
+  "syscall"
+  "log/slog"
+  "encoding/csv"
+  "fmt"
+  "flag"
 )
 
-// VirtualMachine represents a VM's details
-type VirtualMachine struct {
-	Name          string  `json:"name"`
-	Status        string  `json:"status"`
-	CPUUsage      uint    `json:"cpu_usage"`
-	MemoryTotalMB uint64  `json:"memory_total_mb"`
-	MemoryUsedMB  uint64  `json:"memory_used_mb"`
+const version = "1.0.0"
+
+// Config struct to hold configuration options
+type Config struct {
+	LogFile   string
+	Address   string
+	Port      string
 }
 
-// GetVMsHandler retrieves information about VMs
-func GetVMsHandler(w http.ResponseWriter, r *http.Request) {
-	conn, err := libvirt.NewConnect("qemu:///system") // Adjust for remote connection if needed
+// LoadConfig reads the configuration from /etc/sapi.conf
+func LoadConfig() (*Config, error) {
+	file, err := os.Open("/etc/sapi.conf")
 	if err != nil {
-		http.Error(w, "Failed to connect to Libvirt", http.StatusInternalServerError)
-		return
+		return nil, err
 	}
-	defer conn.Close()
+	defer file.Close()
 
-	domains, err := conn.ListAllDomains(0)
-	if err != nil {
-		http.Error(w, "Failed to list VMs", http.StatusInternalServerError)
-		return
-	}
+	config := &Config{}
+	reader := csv.NewReader(file)
+	reader.Comma = '='
 
-	var vms []VirtualMachine
-	for _, dom := range domains {
-		name, _ := dom.GetName()
-		state, _, _ := dom.GetState()
-		maxMem, _ := dom.GetMaxMemory()
-		memStats, _ := dom.MemoryStats(10, 0)
-
-		var usedMem uint64
-		for _, stat := range memStats {
-			if stat.Tag == libvirt.DOMAIN_MEMORY_STAT_ACTUAL_BALLOON {
-				usedMem = stat.Val / 1024
-			}
+	for {
+		record, err := reader.Read()
+		if err != nil {
+			break
 		}
-
-		vms = append(vms, VirtualMachine{
-			Name:          name,
-			Status:        domainStateToString(state),
-			CPUUsage:      getVCPUCount(dom),
-			MemoryTotalMB: maxMem / 1024,
-			MemoryUsedMB:  usedMem,
-		})
-		dom.Free()
+		switch record[0] {
+		case "logfile":
+			config.LogFile = record[1]
+		case "address":
+			config.Address = record[1]
+		case "port":
+			config.Port = record[1]
+		}
 	}
 
-	jsonResponse(w, vms)
-}
-
-// Convert domain state to human-readable string
-func domainStateToString(state libvirt.DomainState) string {
-	switch state {
-	case libvirt.DOMAIN_RUNNING:
-		return "Running"
-	case libvirt.DOMAIN_BLOCKED:
-		return "Blocked"
-	case libvirt.DOMAIN_PAUSED:
-		return "Paused"
-	case libvirt.DOMAIN_SHUTDOWN:
-		return "Shutdown"
-	case libvirt.DOMAIN_SHUTOFF:
-		return "Shutoff"
-	case libvirt.DOMAIN_CRASHED:
-		return "Crashed"
-	default:
-		return "Unknown"
+	if config.Address == "" {
+		config.Address = "0.0.0.0"
 	}
-}
-
-// Get the number of vCPUs assigned to a domain
-func getVCPUCount(dom libvirt.Domain) uint {
-	info, err := dom.GetInfo()
-	if err != nil {
-		return 0
+	if config.Port == "" {
+		config.Port = "8080"
 	}
-	return info.NrVirtCpu
+
+	return config, nil
 }
 
-// jsonResponse helper to send JSON responses
-func jsonResponse(w http.ResponseWriter, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(data)
+// VersionHandler returns the application version
+func VersionHandler(w http.ResponseWriter, r *http.Request) {
+	response := map[string]string{
+		"version": version,
+	}
+	jsonResponse(w, response)
 }
 
 // UptimeHandler returns system uptime
@@ -165,11 +135,57 @@ func splitKeyValue(s string) []string {
 }
 
 func main() {
-	http.HandleFunc("/uptime", UptimeHandler)
-	http.HandleFunc("/diskusage", DiskUsageHandler)
-	http.HandleFunc("/os-release", OSReleaseHandler)
-	http.HandleFunc("/vms", GetVMsHandler)
+  versionFlag := flag.Bool("v", false, "Print version and exit")
+  flag.BoolVar(versionFlag, "version", false, "Print version and exit")
 
-	fmt.Println("Server started on :8069")
-	http.ListenAndServe(":8069", nil)
+  logFileFlag := flag.String("l", "", "Log file location")
+  flag.StringVar(logFileFlag, "logfile", "", "Log file location")
+
+  addressFlag := flag.String("a", "", "Listening address")
+  flag.StringVar(addressFlag, "address", "", "Listening address")
+
+  portFlag := flag.String("p", "", "Listening port")
+  flag.StringVar(portFlag, "port", "", "Listening port")
+
+  flag.Parse()
+
+  if *versionFlag {
+    fmt.Println("sapi version:", version)
+    os.Exit(0)
+  }
+
+  config, err := LoadConfig()
+  if err != nil {
+    fmt.Println("Error loading config:", err)
+    os.Exit(1)
+  }
+
+	if *logFileFlag != "" {
+		config.LogFile = *logFileFlag
+	}
+	if *addressFlag != "" {
+		config.Address = *addressFlag
+	}
+	if *portFlag != "" {
+		config.Port = *portFlag
+	}
+
+  logFile, err := os.OpenFile(config.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+  if err != nil {
+    fmt.Println("Error opening log file:", err)
+    os.Exit(1)
+  }
+  defer logFile.Close()
+
+  logger := slog.New(slog.NewJSONHandler(logFile, nil))
+  slog.SetDefault(logger)
+
+  http.HandleFunc("/api/v1/uptime", UptimeHandler)
+  http.HandleFunc("/api/v1/diskusage", DiskUsageHandler)
+  http.HandleFunc("/api/v1/os-release", OSReleaseHandler)
+  http.HandleFunc("/api/v1/version", VersionHandler)
+
+  serverAddress := fmt.Sprintf("%s:%s", config.Address, config.Port)
+  slog.Info("Server started", slog.String("address", serverAddress))
+  http.ListenAndServe(serverAddress, nil)
 }
