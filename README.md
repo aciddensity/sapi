@@ -14,7 +14,7 @@ go build sapi.go
 
 ## Configs
 
-Sapi will look for a config options in /etc/sapi.conf.
+Sapi will look for config options in /etc/sapi.conf.
 
 Default configuration options are as follows:
 
@@ -32,7 +32,7 @@ Print version and exit
 
 Specify log file location
 
-`--logfile="/var/log/sapi.log"` 
+`-v | --logfile="/var/log/sapi.log"` 
 
 Set listening address
 
@@ -48,7 +48,7 @@ Logs are written to `/var/log/sapi.log` by default.
 
 ## RESTful API
 
-The RESTful API endpoints are provided below. You can test these endpoings with curl.
+The RESTful API endpoints are provided below. You can test these endpoints with curl.
 
 `curl -i localhost:8080/api/v1/version`
 
